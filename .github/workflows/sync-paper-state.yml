@@ -1,0 +1,112 @@
+
+name: Sync Paper Trading Dashboard
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dashboard-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch private bot results
+        env:
+          BOT_READ_TOKEN: ${{ secrets.BOT_READ_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import urllib.request
+          from pathlib import Path
+
+          token = os.environ.get("BOT_READ_TOKEN")
+          if not token:
+              raise SystemExit("Missing BOT_READ_TOKEN secret")
+
+          url = (
+              "https://api.github.com/repos/"
+              "afmerced4-creator/trading-bot/contents/"
+              "experimental_paper_state.json"
+          )
+
+          req = urllib.request.Request(
+              url,
+              headers={
+                  "Authorization": f"Bearer {token}",
+                  "Accept": "application/vnd.github+json",
+                  "User-Agent": "BTC-Dashboard",
+              },
+          )
+
+          with urllib.request.urlopen(req, timeout=20) as response:
+              result = json.load(response)
+
+          state = json.loads(
+              base64.b64decode(result["content"])
+          )
+
+          if (
+              state.get("mode") != "COINBASE_PROXY"
+              or not isinstance(state.get("trades"), list)
+              or not isinstance(state.get("bankroll"), (int, float))
+          ):
+              raise ValueError("Invalid paper trading state")
+
+          allowed = (
+              "round_start",
+              "entered_at",
+              "side",
+              "stake",
+              "ask",
+              "probability",
+              "ev",
+              "status",
+              "pnl",
+              "winning_side",
+              "settlement_source",
+          )
+
+          public_state = {
+              "mode": "COINBASE_PROXY",
+              "bankroll": state["bankroll"],
+              "trades": [
+                  {k: trade[k] for k in allowed if k in trade}
+                  for trade in state["trades"]
+                  if isinstance(trade, dict)
+              ],
+          }
+
+          Path("experimental_paper_state.json").write_text(
+              json.dumps(public_state, indent=2) + "\n"
+          )
+
+          print(
+              "Dashboard data ready:",
+              len(public_state["trades"]),
+              "trades",
+          )
+          PY
+
+      - name: Publish updated results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add experimental_paper_state.json
+
+          if git diff --cached --quiet; then
+            echo "No new data"
+          else
+            git commit -m "Update paper trading dashboard"
+            git push
+          fi
